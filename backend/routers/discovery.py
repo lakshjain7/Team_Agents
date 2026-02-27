@@ -2,11 +2,21 @@
 Discovery & Comparison routes.
 Feature 1: Natural language → hard filter → deterministic weighted ranking
 Feature 2: Multi-policy comparison table
+Feature 3 (Chat): 3-mode conversational advisor
+  Mode GATHER   — asks smart follow-up questions when any essential field missing
+  Mode RECOMMEND — hard filter + weighted rank + RAG insights from actual PDF
+  Mode EXPLAIN   — explains insurance terms grounded in actual policy document text
 """
 from fastapi import APIRouter
 from pydantic import BaseModel
 from services import llm, vector_store
 from services.skills import PolicyRanker, hard_filter
+from services.advisor_agent import (
+    classify_intent,
+    find_uploaded_for_insurer,
+    get_rag_insights,
+    explain_term,
+)
 
 router = APIRouter(prefix="/api", tags=["discovery"])
 ranker = PolicyRanker()
@@ -26,26 +36,6 @@ If a field is not mentioned, omit it or use null. needs can include: maternity, 
 COMPARISON_SYSTEM = """You are a health insurance advisor. Given structured data for 2-3 policies, generate a plain English comparison summary.
 Focus on key differences in coverage, waiting periods, and value. Keep it under 150 words. Be specific with numbers.
 Return JSON: {"summary": "your comparison text", "best_for": {"policy_name": "reason"}}"""
-
-CHAT_SYSTEM = """You are a friendly health insurance advisor for Indian health insurance policies.
-Analyze the conversation history and decide if you have enough information to recommend policies.
-Return ONLY valid JSON:
-{
-  "ready": true or false,
-  "follow_up": "ONE specific follow-up question if not ready, null if ready",
-  "extracted": {
-    "needs": ["maternity", "opd", "mental_health", "ayush", "dental", "critical_illness"],
-    "budget_max": null or annual premium in INR as a number,
-    "members": null or number of family members,
-    "preexisting_conditions": ["diabetes", "hypertension"],
-    "preferred_type": null or "individual" or "family_floater" or "senior_citizen"
-  }
-}
-Rules:
-- Set ready=true if user mentioned ANY of: a health coverage need, a medical condition, a budget, or a plan type
-- Set ready=false ONLY for completely vague messages like "hi", "help me", "insurance", "hello"
-- If ready=false, ask ONE warm and specific follow-up question about what they need
-- Extract whatever partial info you can even from incomplete queries"""
 
 CHAT_INTRO_SYSTEM = """You are a warm health insurance advisor. Write a friendly 1-2 sentence response acknowledging what the user asked for, right before showing their policy recommendations. Be specific about what you understood. Do not say "Great!" or "Sure!" — be natural.
 Return ONLY valid JSON: {"message": "your response here"}"""
@@ -67,12 +57,12 @@ class CompareRequest(BaseModel):
 
 class DiscoverChatRequest(BaseModel):
     messages: list[dict]  # [{role: "user"|"assistant", content: str}]
+    session_policy_ids: list[str] = []  # uploaded PDF IDs from last recommendation (for term lookup)
 
 
-def _apply_hard_filter_and_rank(requirements: dict) -> tuple[list[dict], bool]:
+def _apply_hard_filter_and_rank(requirements: dict) -> list[dict]:
     """
-    Returns (ranked_policies, used_fallback).
-    Applies hard_filter first. If 0 survive, returns ([], False).
+    Applies hard_filter first. If 0 survive, returns [].
     No silent fallback — caller decides how to handle empty.
     """
     requirements["needs"] = requirements.get("needs") or []
@@ -82,17 +72,16 @@ def _apply_hard_filter_and_rank(requirements: dict) -> tuple[list[dict], bool]:
     filtered = hard_filter(all_policies, requirements)
 
     if not filtered:
-        return [], False
+        return []
 
-    ranked = ranker.rank(requirements, filtered)
-    return ranked, False
+    return ranker.rank(requirements, filtered)
 
 
 @router.post("/discover")
 async def discover_policies(req: DiscoverRequest):
     """Extract requirements from natural language, apply hard filter, return deterministic ranked list."""
     requirements = llm.chat_json(EXTRACT_REQUIREMENTS_SYSTEM, req.query)
-    ranked, _ = _apply_hard_filter_and_rank(requirements)
+    ranked = _apply_hard_filter_and_rank(requirements)
 
     if not ranked:
         return {
@@ -112,9 +101,10 @@ async def discover_policies(req: DiscoverRequest):
 @router.post("/discover/chat")
 async def discover_chat(req: DiscoverChatRequest):
     """
-    Conversational policy discovery.
-    - Vague input → asks ONE specific follow-up question
-    - Specific input → hard filter → deterministic ranked results + AI intro sentence
+    3-mode conversational advisor:
+      Mode GATHER   — asks smart questions when any essential field (budget/members/needs) is missing
+      Mode EXPLAIN  — explains insurance terms grounded in actual uploaded policy PDFs
+      Mode RECOMMEND — hard filter + weighted rank + RAG insights per policy from actual PDF text
     """
     if not req.messages:
         return {
@@ -122,45 +112,89 @@ async def discover_chat(req: DiscoverChatRequest):
             "message": "What health coverage are you looking for? Tell me your needs, budget, and family size.",
         }
 
+    # Step 1: Classify intent + extract all requirements from full conversation
     conversation = "\n".join([
         f"{m['role'].upper()}: {m['content']}" for m in req.messages
     ])
-    result = llm.chat_json(CHAT_SYSTEM, f"Conversation:\n{conversation}")
+    intent_result = classify_intent(conversation)
 
-    if not result.get("ready", False):
-        follow_up = (
-            result.get("follow_up")
+    intent = intent_result.get("intent", "gather_info")
+    extracted = intent_result.get("extracted") or {}
+    extracted["needs"] = extracted.get("needs") or []
+    extracted["preexisting_conditions"] = extracted.get("preexisting_conditions") or []
+
+    # ── MODE GATHER: any essential field missing ──────────────────────────────
+    missing_any = (
+        not intent_result.get("has_budget")
+        or not intent_result.get("has_members")
+        or not intent_result.get("has_needs_or_conditions")
+    )
+    if intent == "gather_info" or (missing_any and intent not in ("explain_term", "explain_policy")):
+        question = (
+            intent_result.get("next_question")
             or "Could you tell me your health coverage needs, annual budget, and how many family members need coverage?"
         )
-        return {"type": "question", "message": follow_up}
+        return {"type": "question", "message": question}
 
-    requirements = result.get("extracted") or {}
-    ranked, _ = _apply_hard_filter_and_rank(requirements)
+    # ── MODE EXPLAIN: user asked about a term or specific policy ─────────────
+    if intent in ("explain_term", "explain_policy"):
+        term = intent_result.get("term_to_explain") or intent_result.get("policy_name_asked")
+        if term:
+            result = explain_term(term, req.session_policy_ids)
+            return {
+                "type": "explanation",
+                "message": result.get("explanation", ""),
+                "example": result.get("example"),
+                "citation": result.get("citation"),
+                "policy_name": result.get("policy_name"),
+                "found": result.get("found", False),
+            }
+
+    # ── MODE RECOMMEND: all 3 essential fields present ────────────────────────
+    ranked = _apply_hard_filter_and_rank(extracted)
 
     if not ranked:
         return {
             "type": "no_results",
             "message": NO_RESULTS_MESSAGE,
-            "extracted_requirements": requirements,
+            "extracted_requirements": extracted,
             "policies": [],
             "total_found": 0,
         }
 
+    top_policies = ranked[:6]
+
+    # RAG enrichment: for top 3 policies, find matching uploaded PDF → surface hidden traps
+    user_needs = extracted["needs"] + extracted["preexisting_conditions"]
+    uploaded_ids: list[str] = []
+
+    for i, policy in enumerate(top_policies[:3]):
+        uploaded = find_uploaded_for_insurer(policy.get("insurer", ""))
+        if uploaded:
+            insights = get_rag_insights(uploaded["id"], user_needs, policy.get("insurer", ""))
+            policy["rag_insights"] = insights
+            policy["uploaded_policy_id"] = uploaded["id"]
+            uploaded_ids.append(uploaded["id"])
+        else:
+            policy["rag_insights"] = {"available": False}
+
+    # Build contextual intro message
     last_user = next(
         (m["content"] for m in reversed(req.messages) if m["role"] == "user"), ""
     )
     intro_result = llm.chat_json(
         CHAT_INTRO_SYSTEM,
-        f"User asked: {last_user}\nExtracted needs: {requirements}",
+        f"User asked: {last_user}\nExtracted needs: {extracted}",
     )
     message = intro_result.get("message") or "Here are the best policies matching your needs:"
 
     return {
         "type": "results",
         "message": message,
-        "extracted_requirements": requirements,
-        "policies": ranked[:6],
+        "extracted_requirements": extracted,
+        "policies": top_policies,
         "total_found": len(ranked),
+        "uploaded_policy_ids": uploaded_ids,  # client stores these for future term lookups
     }
 
 

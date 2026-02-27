@@ -1,6 +1,6 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
-import { ArrowLeft, Send, Loader2, Shield, BarChart2, History, Plus, Trash2, X } from "lucide-react";
+import { ArrowLeft, Send, Loader2, Shield, BarChart2, History, Plus, Trash2, X, BookOpen, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import {
   createChatSession,
@@ -8,8 +8,9 @@ import {
   getChatSession,
   sendChatMessage,
   deleteChatSession,
+  discoverChat,
+  comparePolicies,
 } from "@/lib/api";
-import { comparePolicies } from "@/lib/api";
 import PolicyCard from "@/components/PolicyCard";
 import ComparisonTable from "@/components/ComparisonTable";
 
@@ -18,9 +19,14 @@ const SESSION_KEY = "policyai_session_id";
 interface Message {
   role: "user" | "assistant";
   content: string;
-  type?: "question" | "results" | "no_results";
+  type?: "question" | "results" | "no_results" | "explanation";
   policies?: any[];
   extracted?: any;
+  // explanation fields
+  example?: string;
+  citation?: string;
+  policy_name?: string;
+  found?: boolean;
 }
 
 interface Session {
@@ -52,6 +58,7 @@ export default function DiscoverPage() {
   const [sessionLoading, setSessionLoading] = useState(true);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [sessionPolicyIds, setSessionPolicyIds] = useState<string[]>([]);
   const [selected, setSelected] = useState<{ id: string; name: string }[]>([]);
   const [comparing, setComparing] = useState(false);
   const [compareResult, setCompareResult] = useState<any>(null);
@@ -192,12 +199,16 @@ export default function DiscoverPage() {
         data = await sendChatMessage(sessionId, userText);
       } else {
         // Stateless fallback (session creation failed)
-        const { discoverChat } = await import("@/lib/api");
         const apiMessages = [...messages, userMsg].map((m) => ({
           role: m.role,
           content: m.content,
         }));
-        data = await discoverChat(apiMessages);
+        data = await discoverChat(apiMessages, sessionPolicyIds);
+      }
+
+      // Track uploaded policy IDs from results for future term lookups
+      if (data.uploaded_policy_ids?.length) {
+        setSessionPolicyIds(data.uploaded_policy_ids);
       }
 
       setMessages((prev) => [
@@ -208,6 +219,10 @@ export default function DiscoverPage() {
           type: data.type,
           policies: data.policies,
           extracted: data.extracted_requirements,
+          example: data.example,
+          citation: data.citation,
+          policy_name: data.policy_name,
+          found: data.found,
         },
       ]);
     } catch {
@@ -392,15 +407,36 @@ export default function DiscoverPage() {
                         </div>
                       )}
 
-                      {/* Policy cards */}
+                      {/* Policy cards + RAG insights */}
                       <div className="grid gap-3">
                         {msg.policies.map((p: any) => (
-                          <PolicyCard
-                            key={p.id}
-                            {...p}
-                            onCompare={toggleCompare}
-                            isSelected={!!selected.find((s) => s.id === p.id)}
-                          />
+                          <div key={p.id}>
+                            <PolicyCard
+                              {...p}
+                              onCompare={toggleCompare}
+                              isSelected={!!selected.find((s) => s.id === p.id)}
+                            />
+                            {/* RAG insights from actual policy PDF */}
+                            {p.rag_insights?.available && p.rag_insights.hidden_traps?.length > 0 && (
+                              <div className="mt-1 border border-orange-200 bg-orange-50 rounded-xl px-3 py-2.5">
+                                <div className="text-xs font-bold text-orange-700 mb-1.5 flex items-center gap-1">
+                                  <AlertTriangle className="w-3 h-3" /> Hidden Conditions Found in Policy Document
+                                </div>
+                                {p.rag_insights.hidden_traps.map((trap: any, ti: number) => (
+                                  <div key={ti} className="text-xs text-orange-800 mb-1">
+                                    <span className="font-semibold">{trap.type.replace(/_/g, " ")}: </span>
+                                    {trap.plain_english}
+                                    {trap.impact && <span className="text-orange-600"> — {trap.impact}</span>}
+                                  </div>
+                                ))}
+                                {p.rag_insights.key_fact && (
+                                  <div className="text-xs text-orange-700 mt-1.5 border-t border-orange-200 pt-1.5">
+                                    <span className="font-semibold">Key fact: </span>{p.rag_insights.key_fact}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         ))}
                       </div>
 
@@ -445,6 +481,36 @@ export default function DiscoverPage() {
                   {msg.role === "assistant" && msg.type === "no_results" && (
                     <div className="mt-2 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-xs text-amber-800">
                       Try relaxing one requirement — e.g. increase budget slightly or remove a specific coverage need.
+                    </div>
+                  )}
+
+                  {/* Term explanation block */}
+                  {msg.role === "assistant" && msg.type === "explanation" && (
+                    <div className="mt-2 space-y-2">
+                      {msg.found === false ? (
+                        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-sm text-amber-800">
+                          {msg.content}
+                        </div>
+                      ) : (
+                        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 space-y-2">
+                          <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-700 mb-1">
+                            <BookOpen className="w-3.5 h-3.5" /> Plain English Explanation
+                            {msg.policy_name && (
+                              <span className="font-normal text-indigo-500">from {msg.policy_name}</span>
+                            )}
+                          </div>
+                          {msg.example && (
+                            <div className="bg-white rounded-lg px-3 py-2 text-xs text-gray-700 border border-indigo-100">
+                              <span className="font-semibold text-indigo-700">Example: </span>{msg.example}
+                            </div>
+                          )}
+                          {msg.citation && (
+                            <div className="text-xs text-gray-500 border-l-2 border-indigo-300 pl-3 italic">
+                              &quot;{msg.citation}&quot;
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

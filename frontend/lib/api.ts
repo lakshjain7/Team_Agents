@@ -11,8 +11,11 @@ export async function discoverPolicies(query: string) {
   return data;
 }
 
-export async function discoverChat(messages: { role: string; content: string }[]) {
-  const { data } = await API.post("/api/discover/chat", { messages });
+export async function discoverChat(
+  messages: { role: string; content: string }[],
+  session_policy_ids: string[] = []
+) {
+  const { data } = await API.post("/api/discover/chat", { messages, session_policy_ids });
   return data;
 }
 
