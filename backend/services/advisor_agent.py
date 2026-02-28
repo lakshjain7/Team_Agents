@@ -37,14 +37,14 @@ Return ONLY valid JSON — no prose, no markdown:
 }
 
 Intent classification rules:
-- "chat_reply": user is greeting, making small talk, asking a general educational insurance question, asking for advice without wanting specific recommendations, or saying something conversational (hi, thanks, what is health insurance, tell me about waiting periods, which plan is best for elderly, etc.) — answer naturally in text
+- "chat_reply": user is greeting, making small talk, asking a GENERAL educational insurance question, comparing plan types, asking advice without wanting specific recommendations, or saying something conversational. Use chat_reply for ANY question that compares two concepts ("what is the difference between X and Y"), asks about plan types broadly, or seeks general guidance. Answer naturally in text.
 - "gather_info": user wants policy recommendations but ANY of the 3 essential fields is missing → ask next_question
 - "recommend_policies": ALL 3 fields present AND user clearly wants policy recommendations
-- "explain_term": user asks to explain/define a specific insurance term (room rent, co-pay, NCB, waiting period, cashless, sub-limit, TPA, daycare, etc.)
+- "explain_term": ONLY use when user asks to explain a SINGLE specific policy-document clause term that appears verbatim in policy wording (room rent limit, co-pay %, NCB, waiting period, cashless hospitalisation, sub-limit, TPA, daycare procedures). Do NOT use for comparing plan types, general "how does X work" questions, or anything a chat_reply can better handle.
 - "explain_policy": user asks for more detail about a specific named policy
 - "refine_results": user wants to change/narrow results already shown
 
-chat_reply examples: "hi", "hello", "thanks", "what is health insurance?", "which type of plan is better?", "tell me about waiting periods", "is maternity coverage worth it?", "what should I look for in a policy?", "are there any good plans for senior citizens?"
+chat_reply examples: "hi", "hello", "thanks", "what is health insurance?", "which type of plan is better?", "tell me about waiting periods", "is maternity coverage worth it?", "what should I look for in a policy?", "are there any good plans for senior citizens?", "what is the difference between individual and family floater?", "how does a family floater plan work?", "which is better — individual or floater?", "what does restoration benefit mean in general?"
 
 next_question priority (ask ONLY ONE at a time):
   1. If no needs_or_conditions → "What specific health coverage do you need? For example: maternity, diabetes management, OPD visits, or a critical illness plan?"
