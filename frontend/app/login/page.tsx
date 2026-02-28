@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Shield, Eye, EyeOff, Loader2 } from "lucide-react";
 import { createClient } from "@/lib/supabase";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 function getPasswordStrength(password: string): { label: string; color: string; width: string } {
   if (password.length === 0) return { label: "", color: "bg-gray-200", width: "w-0" };
@@ -20,7 +21,7 @@ function getPasswordStrength(password: string): { label: string; color: string; 
 
 export default function LoginPage() {
   const router = useRouter();
-  const supabase = createClient();
+  const supabaseRef = useRef<SupabaseClient | null>(null);
 
   const [tab, setTab] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
@@ -33,17 +34,19 @@ export default function LoginPage() {
 
   const strength = getPasswordStrength(password);
 
-  // Redirect if already logged in
+  // Initialize client and redirect if already logged in (client-side only)
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabaseRef.current = createClient();
+    supabaseRef.current.auth.getSession().then(({ data: { session } }) => {
       if (session) router.replace("/");
     });
   }, []);
 
   const handleGoogleSignIn = async () => {
+    if (!supabaseRef.current) return;
     setGoogleLoading(true);
     setError("");
-    const { error } = await supabase.auth.signInWithOAuth({
+    const { error } = await supabaseRef.current.auth.signInWithOAuth({
       provider: "google",
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
@@ -58,19 +61,20 @@ export default function LoginPage() {
 
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!supabaseRef.current) return;
     setLoading(true);
     setError("");
     setSuccessMsg("");
 
     if (tab === "signin") {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      const { error } = await supabaseRef.current.auth.signInWithPassword({ email, password });
       if (error) {
         setError(error.message);
       } else {
         router.replace("/");
       }
     } else {
-      const { error } = await supabase.auth.signUp({
+      const { error } = await supabaseRef.current.auth.signUp({
         email,
         password,
         options: {

@@ -1,7 +1,7 @@
 "use client";
 
-import { createContext, useContext, useEffect, useState } from "react";
-import type { User, Session } from "@supabase/supabase-js";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
+import type { User, Session, SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "./supabase";
 import { useRouter } from "next/navigation";
 
@@ -24,9 +24,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
-  const supabase = createClient();
+  // Store client in a ref so it's only created on the client side (inside useEffect)
+  const supabaseRef = useRef<SupabaseClient | null>(null);
 
   useEffect(() => {
+    // Only runs in the browser — safe to call createClient() here
+    supabaseRef.current = createClient();
+    const supabase = supabaseRef.current;
+
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
@@ -47,7 +52,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = async () => {
-    await supabase.auth.signOut();
+    if (supabaseRef.current) {
+      await supabaseRef.current.auth.signOut();
+    }
     router.push("/login");
   };
 
